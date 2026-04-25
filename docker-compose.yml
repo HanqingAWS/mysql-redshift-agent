@@ -1,0 +1,46 @@
+# 本机一键起两容器（proxy + agent）
+# 使用前需 export 环境变量（见 .env.example）
+services:
+  agent:
+    build: ./agent
+    image: db-convertor-agent:dev
+    container_name: agent
+    ports:
+      - "8088:8088"
+    environment:
+      - AWS_REGION=${AWS_REGION:-ap-northeast-1}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-jp.anthropic.claude-sonnet-4-6}
+      - REDSHIFT_HOST=${REDSHIFT_HOST}
+      - REDSHIFT_PORT=${REDSHIFT_PORT:-5439}
+      - REDSHIFT_DB=${REDSHIFT_DB}
+      - REDSHIFT_USER=${REDSHIFT_USER}
+      - REDSHIFT_PASSWORD=${REDSHIFT_PASSWORD}
+      # AWS credentials from host (EC2 instance profile via IMDS; or
+      # mount ~/.aws/credentials; or explicit AWS_ACCESS_KEY_ID env)
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  proxy:
+    build: ./proxy
+    image: mysql-redshift-proxy:dev
+    container_name: proxy
+    depends_on:
+      agent:
+        condition: service_healthy
+    ports:
+      - "3307:3306"       # host:container (避开本机若已有 mysql 3306)
+    environment:
+      - PROXY_LISTEN=:3306
+      - PROXY_MYSQL_USER=${PROXY_MYSQL_USER:-demo}
+      - PROXY_MYSQL_PASSWORD=${PROXY_MYSQL_PASSWORD:?set PROXY_MYSQL_PASSWORD in .env}
+      - PROXY_MYSQL_DB=${PROXY_MYSQL_DB:-dw}
+      - REDSHIFT_DSN=${REDSHIFT_DSN}
+      - AGENT_URL=http://agent:8088
+      - CACHE_SIZE=1024
+      - MAX_ATTEMPTS=3

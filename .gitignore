@@ -1,0 +1,35 @@
+# env — real secrets live here, never commit
+.env
+.env.local
+
+# go build artifacts
+proxy/proxy
+proxy/*.exe
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# logs
+*.log
+
+# data dumps / source samples
+scripts/data/
+scripts/*.tsv
+scripts/*.csv
+table-schema.xlsx
+
+# editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# docker
+.dockerignore
+
+# test scratch
+test/
