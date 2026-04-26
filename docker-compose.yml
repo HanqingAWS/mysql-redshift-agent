@@ -30,6 +30,7 @@ services:
       - AURORA_PG_PASSWORD=${AURORA_PG_PASSWORD}
       - KNOWLEDGE_TOP_K=${KNOWLEDGE_TOP_K:-3}
       - KNOWLEDGE_THRESHOLD=${KNOWLEDGE_THRESHOLD:-0.85}
+      - KNOWLEDGE_DEDUP_THRESHOLD=${KNOWLEDGE_DEDUP_THRESHOLD:-0.94}
       # AWS credentials from host (EC2 instance profile via IMDS; or
       # mount ~/.aws/credentials; or explicit AWS_ACCESS_KEY_ID env)
       - AWS_ACCESS_KEY_ID

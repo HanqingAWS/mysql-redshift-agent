@@ -371,10 +371,25 @@ sql_knowledge (
   （source=import；对比失败可 force_save，标记 source=import + compare_mode=override）
 - 种子 → `scripts/seed_knowledge.py`（source=seed）
 
+**写入筛选**（runtime 源默认生效；seed/import 绕过）：
+1. **价值密度过滤** —— 满足以下任一条件则 skip：
+   - `row_count == 0`（空结果，可能是错的过滤或空表）
+   - `redshift_sql` 长度 < 30（`SELECT 1` 之类调试 SQL）
+   - 以 `SET/SHOW/USE/BEGIN/COMMIT/ROLLBACK` 开头（管理命令）
+2. **向量去重**（`KNOWLEDGE_DEDUP_THRESHOLD`，默认 0.94）—— 与库里最相似一条的
+   cosine 相似度 ≥ 阈值时，只 bump `hit_count` + `last_used_at`，不新增行。
+   实测数据定阈值：
+   - 同模板改 uid/时间/LIMIT：0.93–0.95（**应 dedup**）
+   - 改 ORDER BY 字段：0.94（**应保留**）
+   - `NOT IN` 改 `IN` 或白名单换不同值：0.91（**应保留**）
+   - 完全不同聚合 SQL：0.60（显然保留）
+   
+   0.94 是"压重复 + 留业务变化"的拐点。
+
 **召回路径**：
-- Agent `/translate` 每次调用前 `embed(sql, search_query)` → 查 top-3 → 相似度 <0.85
-  过滤 → 命中的贴进 prompt 的 `examples_blob`
-- 召回后异步 `UPDATE ... SET hit_count=hit_count+1, last_used_at=NOW()`，便于后续按
+- Agent `/translate` 每次调用前 `embed(sql, search_query)` → 查 top-3 → 相似度
+  `< KNOWLEDGE_THRESHOLD`（默认 0.85）过滤 → 命中的贴进 prompt 的 `examples_blob`
+- 召回后同步 `UPDATE ... SET hit_count=hit_count+1, last_used_at=NOW()`，便于后续按
   热度淘汰
 
 ---
@@ -393,7 +408,8 @@ sql_knowledge (
 | `TABLE_WHITELIST` | Redshift 分流白名单（逗号分隔） | `iap_orders_5000w,ads_thor_fin_payment_iap_data_new` |
 | `AURORA_PG_HOST` / `AURORA_PG_USER` / `AURORA_PG_PASSWORD` / `AURORA_PG_DB` | Aurora PG Serverless（pgvector 知识库） | `fpdw-pg-cluster...amazonaws.com` / `dbadmin` / `knowledge` |
 | `KNOWLEDGE_TOP_K` | 每次召回条数 | `3` |
-| `KNOWLEDGE_THRESHOLD` | 余弦相似度阈值 | `0.85` |
+| `KNOWLEDGE_THRESHOLD` | 召回余弦相似度阈值（低于不贴 prompt） | `0.85` |
+| `KNOWLEDGE_DEDUP_THRESHOLD` | 写入去重阈值（高于只 bump hit_count） | `0.94` |
 | `PROXY_MYSQL_USER/PASSWORD/DB` | 客户端用这个账号连 Proxy | `demo / <pwd> / fpdw` |
 | `AGENT_URL` | Proxy 找 agent 的地址（compose 内部） | `http://agent:8088` |
 | `CACHE_SIZE` | LRU 条目数 | `1024` |

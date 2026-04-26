@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import contextmanager
 from typing import Iterable, Optional
 
@@ -13,6 +14,8 @@ import psycopg
 from pgvector.psycopg import register_vector
 
 from .embedding import embed
+
+_LOW_VALUE_PREFIX = re.compile(r"^\s*(SET|SHOW|USE|BEGIN|COMMIT|ROLLBACK)\b", re.I)
 
 log = logging.getLogger("sql_knowledge")
 
@@ -24,6 +27,12 @@ PG_PASSWORD = os.environ.get("AURORA_PG_PASSWORD", "")
 
 TOP_K = int(os.environ.get("KNOWLEDGE_TOP_K", "3"))
 THRESHOLD = float(os.environ.get("KNOWLEDGE_THRESHOLD", "0.85"))
+# 写入时的去重阈值：同模板不同字面值的实测相似度在 0.93-0.95，超过此值视为
+# 近似重复，只 bump hit_count，不新增行。0.94 是刚好把"改 ORDER BY / 改 NOT IN"
+# 这类业务语义变化保留下来的拐点（实测）。
+DEDUP_THRESHOLD = float(os.environ.get("KNOWLEDGE_DEDUP_THRESHOLD", "0.94"))
+# 最小 redshift_sql 长度；过短的多是 demo/调试 SQL
+MIN_REDSHIFT_SQL_LEN = 30
 
 
 def _dsn() -> str:
@@ -90,6 +99,17 @@ def retrieve_similar(sql: str, top_k: int = TOP_K, threshold: float = THRESHOLD)
         return []
 
 
+def _is_low_value(mysql_sql: str, redshift_sql: str, row_count: Optional[int]) -> Optional[str]:
+    """价值密度过滤：筛掉 demo/调试/空结果/管理命令。命中返回原因，否则 None。"""
+    if row_count == 0:
+        return "row_count=0"
+    if len(redshift_sql.strip()) < MIN_REDSHIFT_SQL_LEN:
+        return f"redshift_sql too short ({len(redshift_sql.strip())} < {MIN_REDSHIFT_SQL_LEN})"
+    if _LOW_VALUE_PREFIX.match(mysql_sql):
+        return "SET/SHOW/USE/BEGIN/COMMIT/ROLLBACK"
+    return None
+
+
 def save_example(
     mysql_sql: str,
     redshift_sql: str,
@@ -101,11 +121,54 @@ def save_example(
     compare_mode: str = "strict",
     source: str = "runtime",
 ) -> Optional[int]:
-    """UPSERT 一条样本。返回 row id（失败返回 None）。"""
+    """UPSERT 一条样本。返回 row id（失败返回 None）。
+
+    除 md5 精确去重外，额外做两层筛选：
+    - 价值密度：空结果 / 过短 SQL / SET-SHOW-USE 管理命令一律 skip
+    - 向量去重：与库里最相似样本的 cosine 相似度 ≥ DEDUP_THRESHOLD (默认 0.94)
+      时不新增行，只 bump hit_count（同模板不同字面值的重复会被聚合）
+    种子导入 (source=seed) 和批量导入 (source=import) 绕过这两层，直接入库。
+    """
     if not is_enabled():
         return None
+
+    # 种子 / 批量导入是显式人工决定的，不走价值/去重筛选
+    bypass_filter = source in ("seed", "import")
+
+    if not bypass_filter:
+        reason = _is_low_value(mysql_sql, redshift_sql, row_count)
+        if reason:
+            log.info("save_example skip low-value (%s): %.80s", reason, mysql_sql)
+            return None
+
     try:
         vec = embed(mysql_sql, input_type="search_document")
+
+        # 向量去重：查最相似的一条
+        if not bypass_filter:
+            with _conn() as c:
+                row = c.execute(
+                    """
+                    SELECT id, 1 - (embedding <=> %s::vector) AS sim
+                    FROM sql_knowledge
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT 1
+                    """,
+                    (vec, vec),
+                ).fetchone()
+            if row is not None:
+                existing_id, sim = int(row[0]), float(row[1])
+                if sim >= DEDUP_THRESHOLD:
+                    with _conn() as c:
+                        c.execute(
+                            "UPDATE sql_knowledge SET hit_count=hit_count+1, last_used_at=NOW() WHERE id=%s",
+                            (existing_id,),
+                        )
+                        c.commit()
+                    log.info("save_example dedup sim=%.4f bump id=%d: %.80s",
+                             sim, existing_id, mysql_sql)
+                    return existing_id
+
         with _conn() as c:
             rid = c.execute(
                 """
