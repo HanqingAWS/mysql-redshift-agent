@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # 方案 B：Aurora snapshot → S3 Parquet export
 # 依赖：00_env.sh 的 REGION / AURORA_CLUSTER / S3_BUCKET
+# 可选参数：$1 = 要导出的表（fpdw.iap_orders_5000w 等），默认全库
 set -eu
 cd "$(dirname "$0")"
 . ./00_env.sh
+
+# 按表导出（Aurora MySQL 格式：database.table），未传则导全库
+EXPORT_ONLY="${1:-}"
 
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 ROLE_NAME=dw-rds-export-role
@@ -37,8 +41,12 @@ while true; do
     sleep 20
 done
 
-echo "[4/5] start RDS export task"
+echo "[4/5] start RDS export task (export-only=${EXPORT_ONLY:-<all>})"
 EXPORT_ID="dw-parquet-$(date +%Y%m%d-%H%M)"
+EXPORT_ONLY_ARG=()
+if [ -n "$EXPORT_ONLY" ]; then
+    EXPORT_ONLY_ARG=(--export-only "$EXPORT_ONLY")
+fi
 aws rds start-export-task \
     --export-task-identifier "$EXPORT_ID" \
     --source-arn "arn:aws:rds:$REGION:$ACCOUNT:cluster-snapshot:$SNAP_ID" \
@@ -46,6 +54,7 @@ aws rds start-export-task \
     --s3-prefix "planb-export/" \
     --iam-role-arn "$ROLE_ARN" \
     --kms-key-id "$KMS_ID" \
+    "${EXPORT_ONLY_ARG[@]}" \
     --region "$REGION" --query 'Status' --output text
 
 echo "[5/5] poll"
@@ -63,8 +72,14 @@ echo
 echo "=== export done ==="
 aws s3 ls "s3://$S3_BUCKET/planb-export/$EXPORT_ID/" --region "$REGION" --recursive | tail
 echo
-echo "Next: run COPY on Redshift:"
-echo "  COPY public.ads_thor_fin_payment_iap_data_new"
-echo "  FROM 's3://$S3_BUCKET/planb-export/$EXPORT_ID/$AURORA_CLUSTER/dw.ads_thor_fin_payment_iap_data_new/'"
-echo "  IAM_ROLE 'arn:aws:iam::$ACCOUNT:role/redshift-copy-role'"
-echo "  FORMAT AS PARQUET;"
+if [ -n "$EXPORT_ONLY" ]; then
+    TBL="$EXPORT_ONLY"
+    TBL_LOCAL="${TBL##*.}"
+    echo "Next: run COPY on Redshift:"
+    echo "  COPY public.$TBL_LOCAL"
+    echo "  FROM 's3://$S3_BUCKET/planb-export/$EXPORT_ID/$AURORA_CLUSTER/$TBL/'"
+    echo "  IAM_ROLE 'arn:aws:iam::$ACCOUNT:role/redshift-copy-role'"
+    echo "  FORMAT AS PARQUET;"
+else
+    echo "Next: run COPY on Redshift for each table under s3://$S3_BUCKET/planb-export/$EXPORT_ID/"
+fi

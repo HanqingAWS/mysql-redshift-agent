@@ -24,6 +24,7 @@ from strands.tools import tool as strands_tool  # noqa: F401  (imported to be av
 
 from tools.lookup_dialect_rule import lookup_dialect_rule, list_all_rules, match_references
 from tools.get_table_schema import get_table_schema
+from tools import sql_knowledge, compare as sql_compare, executors
 
 
 # ------------------------ config ------------------------
@@ -138,6 +139,8 @@ class TranslateResp(BaseModel):
     used_rules: list[str]
     latency_ms: int
     attempt: str  # "initial" or "fix"
+    examples_hit: int = 0
+    examples: list[dict] = []
 
 
 app = FastAPI(title="db-convertor-agent")
@@ -156,6 +159,10 @@ def translate(req: TranslateReq):
     # pre-filter: 发现关键词 → 把 rule 直接拼进 user message（比等 agent 自己调 tool 快）
     used_rules = match_references(sql)
     rules_blob = lookup_dialect_rule(sql) if used_rules else ""
+
+    # retrieval: 从知识库召回相似历史成功翻译，作为 few-shot
+    examples = sql_knowledge.retrieve_similar(sql) if not req.prev_error else []
+    examples_blob = sql_knowledge.format_examples_for_prompt(examples)
 
     if req.prev_error and req.prev_sql:
         attempt = "fix"
@@ -182,9 +189,12 @@ MySQL SQL:
 
 {rules_blob}
 
+{examples_blob}
+
 Output only the Redshift SQL (no explanation, no code fence)."""
 
-    log.info("translate attempt=%s used_rules=%s sql=%r", attempt, used_rules, sql[:200])
+    log.info("translate attempt=%s used_rules=%s examples_hit=%d sql=%r",
+             attempt, used_rules, len(examples), sql[:200])
 
     try:
         result = get_agent()(user_msg)
@@ -206,7 +216,147 @@ Output only the Redshift SQL (no explanation, no code fence)."""
         used_rules=used_rules,
         latency_ms=latency_ms,
         attempt=attempt,
+        examples_hit=len(examples),
+        examples=[{"similarity": e["similarity"], "mysql_sql": e["mysql_sql"][:200]} for e in examples],
     )
+
+
+# ============ 知识库管理 API ============
+class SaveReq(BaseModel):
+    mysql_sql: str
+    redshift_sql: str
+    used_rules: list[str] = []
+    row_count: int | None = None
+    mysql_ms: int | None = None
+    redshift_ms: int | None = None
+    compare_mode: str = "strict"
+    source: str = "runtime"
+
+
+@app.post("/save_example")
+def save_example_endpoint(req: SaveReq):
+    rid = sql_knowledge.save_example(
+        req.mysql_sql, req.redshift_sql,
+        used_rules=req.used_rules,
+        row_count=req.row_count,
+        mysql_ms=req.mysql_ms,
+        redshift_ms=req.redshift_ms,
+        compare_mode=req.compare_mode,
+        source=req.source,
+    )
+    return {"ok": rid is not None, "id": rid}
+
+
+@app.get("/api/knowledge")
+def api_knowledge_list(limit: int = 50, offset: int = 0, search: str = ""):
+    total = sql_knowledge.count_entries(search)
+    items = sql_knowledge.list_entries(limit=limit, offset=offset, search=search)
+    # 序列化 datetime
+    for it in items:
+        for k in ("created_at", "last_used_at"):
+            if it.get(k) is not None:
+                it[k] = it[k].isoformat()
+    return {"total": total, "items": items}
+
+
+@app.delete("/api/knowledge/{entry_id}")
+def api_knowledge_delete(entry_id: int):
+    ok = sql_knowledge.delete_entry(entry_id)
+    return {"ok": ok}
+
+
+class ImportTestReq(BaseModel):
+    mysql_sql: str
+    compare_mode: str = "strict"  # strict / lenient / skipped
+    force_save: bool = False       # A 选项：对比失败仍强制入库
+
+
+class ImportTestResp(BaseModel):
+    mysql_sql: str
+    redshift_sql: str | None = None
+    translate_ms: int | None = None
+    used_rules: list[str] = []
+    examples_hit: int = 0
+    mysql_ok: bool = False
+    mysql_ms: int | None = None
+    mysql_rows: int | None = None
+    mysql_error: str | None = None
+    redshift_ok: bool = False
+    redshift_ms: int | None = None
+    redshift_rows: int | None = None
+    redshift_error: str | None = None
+    compare_ok: bool = False
+    compare_reason: str = ""
+    saved: bool = False
+    saved_id: int | None = None
+
+
+@app.post("/api/knowledge/import_test", response_model=ImportTestResp)
+def api_knowledge_import_test(req: ImportTestReq):
+    """翻译 + MySQL 执行 + Redshift 执行 + 结果对比 + 入库（按要求）。
+    这是 webui "翻译并验证后入库" 流程的核心 endpoint。
+    """
+    resp = ImportTestResp(mysql_sql=req.mysql_sql)
+
+    # 1. 翻译
+    try:
+        tr = translate(TranslateReq(sql=req.mysql_sql))
+        resp.redshift_sql = tr.redshift_sql
+        resp.translate_ms = tr.latency_ms
+        resp.used_rules = tr.used_rules
+        resp.examples_hit = tr.examples_hit
+    except HTTPException as e:
+        resp.compare_reason = f"翻译失败: {e.detail}"
+        return resp
+    except Exception as e:
+        resp.compare_reason = f"翻译异常: {e}"
+        return resp
+
+    # 2. MySQL 执行
+    try:
+        r = executors.run_mysql(req.mysql_sql)
+        resp.mysql_ok = True
+        resp.mysql_ms = r["latency_ms"]
+        resp.mysql_rows = len(r["rows"])
+        my_cols, my_rows = r["columns"], r["rows"]
+    except Exception as e:
+        resp.mysql_error = str(e)[:500]
+        resp.compare_reason = f"MySQL 执行失败: {resp.mysql_error}"
+        return resp
+
+    # 3. Redshift 执行
+    try:
+        r = executors.run_redshift(resp.redshift_sql)
+        resp.redshift_ok = True
+        resp.redshift_ms = r["latency_ms"]
+        resp.redshift_rows = len(r["rows"])
+        rs_cols, rs_rows = r["columns"], r["rows"]
+    except Exception as e:
+        resp.redshift_error = str(e)[:500]
+        resp.compare_reason = f"Redshift 执行失败: {resp.redshift_error}"
+        return resp
+
+    # 4. 对比
+    cmp = sql_compare.compare(my_rows, rs_rows, my_cols, rs_cols, mode=req.compare_mode)
+    resp.compare_ok = cmp["ok"]
+    resp.compare_reason = cmp["reason"]
+
+    # 5. 入库（对比通过，或对比失败但 force_save）
+    should_save = cmp["ok"] or req.force_save
+    if should_save:
+        rid = sql_knowledge.save_example(
+            req.mysql_sql, resp.redshift_sql,
+            used_rules=resp.used_rules,
+            row_count=resp.mysql_rows,
+            mysql_ms=resp.mysql_ms,
+            redshift_ms=resp.redshift_ms,
+            compare_mode=("override" if (not cmp["ok"] and req.force_save) else req.compare_mode),
+            source="import",
+        )
+        resp.saved = rid is not None
+        resp.saved_id = rid
+
+    return resp
 
 
 if __name__ == "__main__":

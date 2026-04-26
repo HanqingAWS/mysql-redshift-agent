@@ -9,12 +9,27 @@ services:
       - "8088:8088"
     environment:
       - AWS_REGION=${AWS_REGION:-ap-northeast-1}
-      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-jp.anthropic.claude-sonnet-4-6}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}
+      - EMBEDDING_MODEL_ID=${EMBEDDING_MODEL_ID:-cohere.embed-multilingual-v3}
       - REDSHIFT_HOST=${REDSHIFT_HOST}
       - REDSHIFT_PORT=${REDSHIFT_PORT:-5439}
       - REDSHIFT_DB=${REDSHIFT_DB}
       - REDSHIFT_USER=${REDSHIFT_USER}
       - REDSHIFT_PASSWORD=${REDSHIFT_PASSWORD}
+      # Aurora MySQL (agent 用来跑 import_test 做结果对比)
+      - AURORA_HOST=${AURORA_HOST}
+      - AURORA_PORT=${AURORA_PORT:-3306}
+      - AURORA_USER=${AURORA_USER:-admin}
+      - AURORA_PASSWORD=${AURORA_PASSWORD}
+      - AURORA_DB=${AURORA_DB:-fpdw}
+      # Aurora PostgreSQL (pgvector 知识库)
+      - AURORA_PG_HOST=${AURORA_PG_HOST}
+      - AURORA_PG_PORT=${AURORA_PG_PORT:-5432}
+      - AURORA_PG_DB=${AURORA_PG_DB:-knowledge}
+      - AURORA_PG_USER=${AURORA_PG_USER:-dbadmin}
+      - AURORA_PG_PASSWORD=${AURORA_PG_PASSWORD}
+      - KNOWLEDGE_TOP_K=${KNOWLEDGE_TOP_K:-3}
+      - KNOWLEDGE_THRESHOLD=${KNOWLEDGE_THRESHOLD:-0.85}
       # AWS credentials from host (EC2 instance profile via IMDS; or
       # mount ~/.aws/credentials; or explicit AWS_ACCESS_KEY_ID env)
       - AWS_ACCESS_KEY_ID
@@ -41,6 +56,35 @@ services:
       - PROXY_MYSQL_PASSWORD=${PROXY_MYSQL_PASSWORD:?set PROXY_MYSQL_PASSWORD in .env}
       - PROXY_MYSQL_DB=${PROXY_MYSQL_DB:-dw}
       - REDSHIFT_DSN=${REDSHIFT_DSN}
+      - MYSQL_DSN=${MYSQL_DSN:-}
+      - TABLE_WHITELIST=${TABLE_WHITELIST:-}
       - AGENT_URL=http://agent:8088
       - CACHE_SIZE=1024
       - MAX_ATTEMPTS=3
+
+  webui:
+    build: ./webui
+    image: mysql-redshift-webui:dev
+    container_name: webui
+    depends_on:
+      agent:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+    environment:
+      - AURORA_HOST=${AURORA_HOST}
+      - AURORA_PORT=${AURORA_PORT:-3306}
+      - AURORA_USER=${AURORA_USER:-admin}
+      - AURORA_PASSWORD=${AURORA_PASSWORD:?set AURORA_PASSWORD in .env}
+      - AURORA_DB=${AURORA_DB:-dw}
+      - REDSHIFT_HOST=${REDSHIFT_HOST}
+      - REDSHIFT_PORT=${REDSHIFT_PORT:-5439}
+      - REDSHIFT_DB=${REDSHIFT_DB}
+      - REDSHIFT_USER=${REDSHIFT_USER}
+      - REDSHIFT_PASSWORD=${REDSHIFT_PASSWORD}
+      - PROXY_HOST=proxy
+      - PROXY_PORT=3306
+      - PROXY_MYSQL_USER=${PROXY_MYSQL_USER:-demo}
+      - PROXY_MYSQL_PASSWORD=${PROXY_MYSQL_PASSWORD:?set PROXY_MYSQL_PASSWORD in .env}
+      - PROXY_MYSQL_DB=${PROXY_MYSQL_DB:-dw}
+      - AGENT_URL=http://agent:8088

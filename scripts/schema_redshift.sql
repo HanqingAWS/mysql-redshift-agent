@@ -35,3 +35,37 @@ CREATE TABLE ads_thor_fin_payment_iap_data_new (
 )
 DISTSTYLE AUTO
 SORTKEY (event_time);
+
+-- Monthly partition-style table, 50M rows, used for the MySQL-slow-vs-Redshift-fast demo.
+-- Parquet-int32 lesson: TINYINT/SMALLINT source must be INTEGER on Redshift side when
+-- the loader is RDS Export → Parquet → COPY FORMAT PARQUET (see docs/migration_prod.md §5).
+DROP TABLE IF EXISTS iap_orders_5000w;
+
+CREATE TABLE iap_orders_5000w (
+  game_name           VARCHAR(64),
+  uid                 VARCHAR(32),
+  transaction_id      VARCHAR(64),
+  event_time          TIMESTAMP,
+  fpid                BIGINT,
+  app_id              VARCHAR(16),
+  device_platform     VARCHAR(16),
+  country_code        VARCHAR(8),
+  gameserver_id       VARCHAR(16),
+  app_language        VARCHAR(8),
+  device_level        INTEGER,
+  city_level          INTEGER,
+  amount              DECIMAL(12,4),
+  is_white_user       INTEGER,
+  new_app_id          VARCHAR(16),
+  payment_processor   VARCHAR(32),
+  iap_product_id      VARCHAR(128),
+  iap_product_name    VARCHAR(128),
+  base_price          VARCHAR(16),
+  iap_product_name_cn VARCHAR(128),
+  app_version         VARCHAR(32),
+  currency            VARCHAR(8),
+  order_id            VARCHAR(64),
+  ts                  BIGINT
+)
+DISTSTYLE AUTO
+SORTKEY (event_time);

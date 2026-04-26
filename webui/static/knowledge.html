@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SQL 知识库管理 · MySQL ⇄ Redshift Bridge</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.0.20/400.css" />
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scroll-thin::-webkit-scrollbar-thumb { background: #2a2f3a; border-radius: 4px; }
+  details > summary { cursor: pointer; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  pre { white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+
+<body class="bg-slate-950 text-slate-200 antialiased" x-data="kbApp()" x-init="init()">
+
+<header class="border-b border-slate-800 bg-slate-900/60 backdrop-blur">
+  <div class="max-w-[1600px] mx-auto px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center font-bold">🧠</div>
+      <div>
+        <div class="text-lg font-semibold">SQL 知识库管理</div>
+        <div class="text-xs text-slate-400">成功翻译样本沉淀 · 向量召回 · 批量导入验证</div>
+      </div>
+    </div>
+    <div class="flex items-center gap-3 text-xs">
+      <a :href="location.pathname.startsWith('/dbms/') ? '/dbms/' : '/'" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-white">← 返回 DBMS</a>
+      <a :href="(location.pathname.startsWith('/dbms/') ? '/dbms' : '') + '/static/report.html'" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-white">📊 测试报告</a>
+    </div>
+  </div>
+</header>
+
+<div class="max-w-[1600px] mx-auto px-6 py-6 space-y-6">
+
+  <!-- 统计卡 -->
+  <div class="grid grid-cols-4 gap-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wider">总条数</div>
+      <div class="text-3xl font-bold mt-1" x-text="total"></div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wider">召回阈值</div>
+      <div class="text-3xl font-bold mt-1">0.85</div>
+      <div class="text-xs text-slate-500">cosine similarity</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wider">Embedding 模型</div>
+      <div class="text-base font-semibold mt-1 mono">cohere.embed-multilingual-v3</div>
+      <div class="text-xs text-slate-500">1024 维</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wider">翻译模型</div>
+      <div class="text-base font-semibold mt-1 mono">claude-sonnet-4-6</div>
+      <div class="text-xs text-slate-500">global inference profile</div>
+    </div>
+  </div>
+
+  <!-- 导入卡 -->
+  <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <div class="text-base font-semibold">📥 批量导入 SQL</div>
+        <div class="text-xs text-slate-500 mt-1">粘贴或上传 .sql 文件；每条 SQL 将经历：翻译 → MySQL 执行 → Redshift 执行 → 结果对比 → 入库</div>
+      </div>
+      <div class="flex items-center gap-3 text-xs">
+        <label class="flex items-center gap-1.5">
+          <span class="text-slate-400">对比模式</span>
+          <select x-model="importMode" class="bg-slate-800 border border-slate-700 rounded px-2 py-1">
+            <option value="strict">严格（列+行+值完全一致）</option>
+            <option value="lenient">宽松（仅行数一致）</option>
+            <option value="skipped">跳过对比（只要求双边执行成功）</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <textarea x-model="importText" rows="5"
+      placeholder="-- 粘贴 SQL，多条用 ; 分隔&#10;SELECT COUNT(*) FROM iap_orders_5000w;&#10;SELECT uid, SUM(amount) FROM iap_orders_5000w GROUP BY uid LIMIT 10;"
+      class="w-full bg-slate-950 border border-slate-700 rounded p-3 text-sm mono scroll-thin resize-y focus:outline-none focus:border-indigo-500"></textarea>
+
+    <div class="flex items-center justify-between mt-3">
+      <div class="flex items-center gap-3">
+        <label class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-white text-sm cursor-pointer">
+          📁 选择 .sql 文件
+          <input type="file" accept=".sql,.txt" class="hidden" @change="onFile($event)">
+        </label>
+        <button @click="startImport()" :disabled="importing || !importText.trim()"
+          class="px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed">
+          <span x-show="!importing">▶ 开始导入</span>
+          <span x-show="importing">⏳ 导入中 (<span x-text="progressDone"></span>/<span x-text="progressTotal"></span>)</span>
+        </button>
+        <button x-show="importing" @click="cancelImport()" class="px-3 py-1.5 rounded bg-rose-700 hover:bg-rose-600 text-white text-xs">取消</button>
+      </div>
+      <div class="text-xs text-slate-500 mono" x-show="importResults.length">
+        ✅ 入库 <span class="text-emerald-400" x-text="importResults.filter(r => r.saved).length"></span>
+        · ❌ 失败 <span class="text-rose-400" x-text="importResults.filter(r => !r.saved && !r.pending).length"></span>
+      </div>
+    </div>
+
+    <!-- 导入结果列表 -->
+    <div class="mt-4 space-y-2 max-h-80 overflow-y-auto scroll-thin" x-show="importResults.length">
+      <template x-for="(r, idx) in importResults" :key="idx">
+        <details class="bg-slate-950 border rounded" :class="r.saved ? 'border-emerald-700' : (r.pending ? 'border-slate-700' : 'border-rose-700')">
+          <summary class="px-3 py-2 flex items-center gap-3 text-sm">
+            <span x-text="idx + 1" class="text-slate-500 w-6"></span>
+            <span x-show="r.pending" class="text-slate-500">⏳ 处理中...</span>
+            <span x-show="r.saved" class="text-emerald-400">✅ 入库成功</span>
+            <span x-show="!r.saved && !r.pending" class="text-rose-400">❌ 未入库</span>
+            <code class="flex-1 mono text-xs text-slate-400 truncate" x-text="r.mysql_sql"></code>
+            <span x-show="r.compare_reason" class="text-xs text-slate-500 mono ml-2" x-text="r.compare_reason"></span>
+            <!-- 对比失败时强制入库按钮（A 选项） -->
+            <button x-show="r.compare_failed && !r.saved"
+                    @click.stop="forceSave(idx)"
+                    class="px-2 py-0.5 rounded bg-amber-700 hover:bg-amber-600 text-xs text-white">⚠ 仍入库</button>
+          </summary>
+          <div class="px-3 py-2 border-t border-slate-800 text-xs space-y-2">
+            <div>
+              <div class="text-slate-500 mb-1">MySQL SQL：</div>
+              <pre class="mono bg-slate-900 p-2 rounded" x-text="r.mysql_sql"></pre>
+            </div>
+            <div x-show="r.redshift_sql">
+              <div class="text-slate-500 mb-1">翻译后的 Redshift SQL（<span x-text="r.translate_ms"></span>ms）：</div>
+              <pre class="mono bg-slate-900 p-2 rounded text-emerald-300" x-text="r.redshift_sql"></pre>
+            </div>
+            <div class="flex gap-4 text-slate-400">
+              <span x-show="r.mysql_ms !== null && r.mysql_ms !== undefined">MySQL: <span x-text="r.mysql_ms"></span>ms, <span x-text="r.mysql_rows"></span> 行</span>
+              <span x-show="r.redshift_ms !== null && r.redshift_ms !== undefined">Redshift: <span x-text="r.redshift_ms"></span>ms, <span x-text="r.redshift_rows"></span> 行</span>
+              <span x-show="r.examples_hit" class="text-indigo-400">召回 <span x-text="r.examples_hit"></span> 条历史样例</span>
+            </div>
+            <div x-show="r.mysql_error" class="text-rose-400">MySQL 错误：<span x-text="r.mysql_error"></span></div>
+            <div x-show="r.redshift_error" class="text-rose-400">Redshift 错误：<span x-text="r.redshift_error"></span></div>
+          </div>
+        </details>
+      </template>
+    </div>
+  </div>
+
+  <!-- 知识库列表 -->
+  <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <div class="text-base font-semibold">📚 已有样本 <span class="text-slate-500 text-sm">（按最近使用排序）</span></div>
+      </div>
+      <div class="flex items-center gap-2">
+        <input x-model="search" @input.debounce.400ms="reload()" placeholder="搜索 SQL..."
+               class="bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm w-64 focus:outline-none focus:border-indigo-500">
+        <button @click="reload()" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm">🔄 刷新</button>
+      </div>
+    </div>
+
+    <div class="space-y-2 max-h-[500px] overflow-y-auto scroll-thin">
+      <template x-for="item in items" :key="item.id">
+        <details class="bg-slate-950 border border-slate-800 rounded">
+          <summary class="px-3 py-2 flex items-center gap-3 text-sm hover:bg-slate-900">
+            <span class="text-slate-500 text-xs mono w-10" x-text="'#' + item.id"></span>
+            <code class="flex-1 mono text-xs text-slate-300 truncate" x-text="item.mysql_sql"></code>
+            <span class="text-xs text-slate-500" x-text="'命中 ' + item.hit_count + ' 次'"></span>
+            <span class="text-xs px-1.5 py-0.5 rounded mono"
+              :class="{'bg-emerald-900 text-emerald-300': item.source === 'import',
+                       'bg-indigo-900 text-indigo-300': item.source === 'runtime',
+                       'bg-slate-700 text-slate-300': item.source === 'seed'}"
+              x-text="item.source"></span>
+            <button @click.stop="del(item.id)" class="text-rose-400 hover:text-rose-300 text-xs">🗑</button>
+          </summary>
+          <div class="px-3 py-2 border-t border-slate-800 text-xs space-y-2">
+            <div>
+              <div class="text-slate-500 mb-1">MySQL SQL：</div>
+              <pre class="mono bg-slate-900 p-2 rounded" x-text="item.mysql_sql"></pre>
+            </div>
+            <div>
+              <div class="text-slate-500 mb-1">Redshift SQL：</div>
+              <pre class="mono bg-slate-900 p-2 rounded text-emerald-300" x-text="item.redshift_sql"></pre>
+            </div>
+            <div class="flex flex-wrap gap-4 text-slate-400 pt-1">
+              <span>行数：<span x-text="item.row_count"></span></span>
+              <span x-show="item.mysql_ms">MySQL: <span x-text="item.mysql_ms"></span>ms</span>
+              <span x-show="item.redshift_ms">Redshift: <span x-text="item.redshift_ms"></span>ms</span>
+              <span>对比模式：<span x-text="item.compare_mode"></span></span>
+              <span x-show="item.used_rules && item.used_rules.length" class="text-indigo-400">
+                命中规则：<span x-text="(item.used_rules || []).join(', ')"></span>
+              </span>
+            </div>
+            <div class="text-slate-600 text-[11px]">
+              创建：<span x-text="item.created_at"></span>
+              · 最近使用：<span x-text="item.last_used_at"></span>
+            </div>
+          </div>
+        </details>
+      </template>
+      <div x-show="!items.length" class="text-center py-16 text-slate-500">
+        知识库还是空的。用上方"批量导入"或让 Proxy 跑一些 SQL 自动沉淀。
+      </div>
+    </div>
+
+    <div class="flex items-center justify-between mt-3 text-xs text-slate-500">
+      <span>共 <span x-text="total"></span> 条</span>
+      <div class="flex gap-2">
+        <button @click="prevPage()" :disabled="offset <= 0"
+          class="px-2 py-1 rounded bg-slate-800 disabled:opacity-40">上一页</button>
+        <span>第 <span x-text="Math.floor(offset / limit) + 1"></span> / <span x-text="Math.max(1, Math.ceil(total / limit))"></span> 页</span>
+        <button @click="nextPage()" :disabled="offset + limit >= total"
+          class="px-2 py-1 rounded bg-slate-800 disabled:opacity-40">下一页</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function kbApp() {
+  // CDN 下路径前缀是 /dbms，本地直连是 /
+  const PFX = location.pathname.startsWith('/dbms/') ? '/dbms' : '';
+  return {
+    items: [],
+    total: 0,
+    search: '',
+    offset: 0,
+    limit: 20,
+    importText: '',
+    importMode: 'strict',
+    importing: false,
+    _cancel: false,
+    progressDone: 0,
+    progressTotal: 0,
+    importResults: [],
+
+    async init() {
+      await this.reload();
+    },
+
+    async reload() {
+      const p = new URLSearchParams({ limit: this.limit, offset: this.offset, search: this.search });
+      const r = await fetch(PFX + '/api/knowledge?' + p);
+      const j = await r.json();
+      this.items = j.items || [];
+      this.total = j.total || 0;
+    },
+
+    async prevPage() {
+      this.offset = Math.max(0, this.offset - this.limit);
+      await this.reload();
+    },
+
+    async nextPage() {
+      this.offset = this.offset + this.limit;
+      await this.reload();
+    },
+
+    async del(id) {
+      if (!confirm('确认删除这条样本？')) return;
+      await fetch(PFX + '/api/knowledge/' + id, { method: 'DELETE' });
+      await this.reload();
+    },
+
+    onFile(ev) {
+      const f = ev.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = (e) => { this.importText = e.target.result; };
+      reader.readAsText(f);
+    },
+
+    splitSqls(text) {
+      // 简单按 ; 切分，忽略空行和 -- 注释开头的空 SQL
+      return text.split(';')
+        .map(s => s.trim())
+        .filter(s => s && !s.split('\n').every(l => l.trim().startsWith('--') || !l.trim()));
+    },
+
+    async startImport() {
+      const sqls = this.splitSqls(this.importText);
+      if (!sqls.length) { alert('没解析到任何 SQL'); return; }
+      this.importing = true;
+      this._cancel = false;
+      this.progressTotal = sqls.length;
+      this.progressDone = 0;
+      this.importResults = sqls.map(s => ({ mysql_sql: s, pending: true, saved: false }));
+
+      for (let i = 0; i < sqls.length; i++) {
+        if (this._cancel) break;
+        try {
+          const resp = await fetch(PFX + '/api/knowledge/import_test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mysql_sql: sqls[i], compare_mode: this.importMode, force_save: false })
+          });
+          const j = await resp.json();
+          j.pending = false;
+          // 如果翻译/执行都成功但对比失败且未入库 → 标记为可强制入库
+          j.compare_failed = !j.saved && j.redshift_ok && j.mysql_ok && !j.compare_ok;
+          this.importResults[i] = j;
+        } catch (e) {
+          this.importResults[i] = {
+            mysql_sql: sqls[i], pending: false, saved: false,
+            compare_reason: '请求失败: ' + e.message,
+          };
+        }
+        this.progressDone = i + 1;
+      }
+
+      this.importing = false;
+      await this.reload();
+
+      // 提示用户：如果有对比失败的条目，弹窗建议
+      const failedCompare = this.importResults.filter(r => r.compare_failed).length;
+      if (failedCompare > 0) {
+        alert(
+          `${failedCompare} 条 SQL 对比不一致，未入库。\n` +
+          `建议你先人工检查这些 SQL 的语义差异。\n` +
+          `如果确认结果可接受，可点击条目右侧的 "⚠ 仍入库" 强制保存（会标记为 override 来源）。`
+        );
+      }
+    },
+
+    cancelImport() {
+      this._cancel = true;
+    },
+
+    async forceSave(idx) {
+      const r = this.importResults[idx];
+      if (!r || !r.redshift_sql) return;
+      if (!confirm('对比未通过，确认仍然入库？\n\n理由：' + (r.compare_reason || '未知'))) return;
+      try {
+        const resp = await fetch('/api/knowledge/import_test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mysql_sql: r.mysql_sql, compare_mode: this.importMode, force_save: true })
+        });
+        const j = await resp.json();
+        j.pending = false;
+        j.compare_failed = false;
+        this.importResults[idx] = j;
+        await this.reload();
+      } catch (e) {
+        alert('请求失败: ' + e.message);
+      }
+    },
+  };
+}
+</script>
+
+</body>
+</html>

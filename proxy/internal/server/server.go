@@ -19,19 +19,24 @@ import (
 	"github.com/HanqingAWS/mysql-redshift-agent/proxy/internal/config"
 	"github.com/HanqingAWS/mysql-redshift-agent/proxy/internal/convertor_client"
 	"github.com/HanqingAWS/mysql-redshift-agent/proxy/internal/executor"
+	"github.com/HanqingAWS/mysql-redshift-agent/proxy/internal/knowledge"
 	"github.com/HanqingAWS/mysql-redshift-agent/proxy/internal/resultmap"
+	"github.com/HanqingAWS/mysql-redshift-agent/proxy/internal/router"
 )
 
 type Server struct {
 	cfg       config.Config
-	exec      *executor.Redshift
+	rsExec    *executor.Redshift
+	myExec    *executor.MySQL // nil if MySQL routing disabled
+	router    *router.Router
 	cache     *cache.Cache
 	agent     *convertor_client.Client
+	kb        *knowledge.Client
 	authH     *mysqlsrv.InMemoryAuthenticationHandler
 	serverCfg *mysqlsrv.Server
 }
 
-func New(cfg config.Config, exec *executor.Redshift) *Server {
+func New(cfg config.Config, rsExec *executor.Redshift, myExec *executor.MySQL, rtr *router.Router) *Server {
 	cc, err := cache.New(cfg.CacheSize)
 	if err != nil {
 		log.Fatalf("cache init failed: %v", err)
@@ -44,9 +49,12 @@ func New(cfg config.Config, exec *executor.Redshift) *Server {
 	srvCfg := mysqlsrv.NewServer("8.0.0-proxy", gomysql.DEFAULT_COLLATION_ID, gomysql.AUTH_NATIVE_PASSWORD, nil, nil)
 	return &Server{
 		cfg:       cfg,
-		exec:      exec,
+		rsExec:    rsExec,
+		myExec:    myExec,
+		router:    rtr,
 		cache:     cc,
 		agent:     convertor_client.New(cfg.AgentURL),
+		kb:        knowledge.New(cfg.AgentURL),
 		authH:     authH,
 		serverCfg: srvCfg,
 	}
@@ -117,7 +125,24 @@ func (h *connHandler) HandleQuery(query string) (*gomysql.Result, error) {
 		return emptyResult(), nil
 	}
 
-	// 2. 缓存查
+	// 2. Route — table whitelist decides MySQL vs Redshift.
+	dest, tables, reason := h.srv.router.Route(query)
+	log.Printf("[route] -> %s tables=%v (%s)", dest, tables, reason)
+
+	if dest == router.DestMySQL {
+		if h.srv.myExec == nil {
+			return nil, fmt.Errorf("router selected MySQL but MYSQL_DSN not configured (tables=%v)", tables)
+		}
+		ctx, cancel := context.WithTimeout(h.ctx, 60*time.Second)
+		defer cancel()
+		result, err := h.srv.myExec.ExecSelect(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("mysql exec: %w", err)
+		}
+		return resultmap.ToMySQL(result)
+	}
+
+	// 3. Redshift path: cache → translate → exec with retry
 	key := cache.Key(query)
 	rsQuery, ok := h.srv.cache.Get(key)
 	if ok {
@@ -125,7 +150,6 @@ func (h *connHandler) HandleQuery(query string) (*gomysql.Result, error) {
 		log.Printf("[cache] HIT key=%s", key[:8])
 	} else {
 		cache.IncMiss()
-		// 3. 通过 agent 翻译
 		resp, err := h.srv.agent.Translate(h.ctx, convertor_client.TranslateRequest{SQL: query})
 		if err != nil {
 			return nil, fmt.Errorf("translate failed: %w", err)
@@ -136,26 +160,41 @@ func (h *connHandler) HandleQuery(query string) (*gomysql.Result, error) {
 		h.srv.cache.Set(key, rsQuery)
 	}
 
-	// 4. 执行 Redshift，失败回喂 agent 最多 MaxAttempts-1 次
-	result, err := h.execWithRetry(query, rsQuery)
+	result, winningSQL, rsMs, err := h.execWithRetry(query, rsQuery)
 	if err != nil {
 		return nil, err
 	}
-
-	// 5. 转成 MySQL Result
+	// 缓存更新为真正执行成功的 SQL（可能是 retry 修正过的）
+	if winningSQL != rsQuery {
+		h.srv.cache.Set(key, winningSQL)
+	}
+	// 异步回写知识库（fire-and-forget，不阻塞响应）
+	if h.srv.kb != nil && len(result.Rows) > 0 && len(winningSQL) < 8000 {
+		h.srv.kb.SaveAsync(knowledge.SaveReq{
+			MySQLSQL:    query,
+			RedshiftSQL: winningSQL,
+			RowCount:    int64(len(result.Rows)),
+			RedshiftMs:  rsMs,
+			CompareMode: "skipped", // Proxy 运行态不做双边对比（已被 Redshift 成功返回即可）
+			Source:      "runtime",
+		})
+	}
 	return resultmap.ToMySQL(result)
 }
 
-func (h *connHandler) execWithRetry(originalSQL, rsSQL string) (*executor.Result, error) {
+// execWithRetry 返回 (result, winningSQL, elapsedMs, err)。
+// winningSQL 是真正跑通的那版 SQL（可能是初始翻译，也可能是修正后的）。
+func (h *connHandler) execWithRetry(originalSQL, rsSQL string) (*executor.Result, string, int, error) {
 	ctx, cancel := context.WithTimeout(h.ctx, 60*time.Second)
 	defer cancel()
 
 	var prevErr error
 	curSQL := rsSQL
 	for attempt := 0; attempt < h.srv.cfg.MaxAttempts; attempt++ {
-		result, err := h.srv.exec.ExecSelect(ctx, curSQL)
+		started := time.Now()
+		result, err := h.srv.rsExec.ExecSelect(ctx, curSQL)
 		if err == nil {
-			return result, nil
+			return result, curSQL, int(time.Since(started).Milliseconds()), nil
 		}
 		log.Printf("[redshift] attempt %d failed: %v", attempt, err)
 		prevErr = err
@@ -175,7 +214,7 @@ func (h *connHandler) execWithRetry(originalSQL, rsSQL string) (*executor.Result
 		log.Printf("[translate-fix] new sql=%s", trunc(fixResp.RedshiftSQL, 200))
 		curSQL = fixResp.RedshiftSQL
 	}
-	return nil, fmt.Errorf("redshift exec after %d attempts: %w", h.srv.cfg.MaxAttempts, prevErr)
+	return nil, "", 0, fmt.Errorf("redshift exec after %d attempts: %w", h.srv.cfg.MaxAttempts, prevErr)
 }
 
 // The rest: COM_STMT_* and others — proxy returns basic support

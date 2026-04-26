@@ -19,6 +19,15 @@ type Config struct {
 	// Downstream Redshift
 	RedshiftDSN string // postgres://user:pass@host:5439/db?sslmode=require
 
+	// Downstream MySQL (direct pass-through for non-whitelisted tables).
+	// Empty → MySQL routing disabled, all SQL goes to Redshift (original demo behavior).
+	MySQLDSN string // user:pass@tcp(host:3306)/db?parseTime=true
+
+	// Comma-separated list of tables that SHOULD be served from Redshift.
+	// A query is routed to Redshift iff ALL of its referenced tables are in
+	// this list. Empty list = always Redshift (backwards compatible).
+	TableWhitelist string
+
 	// Agent
 	AgentURL string // http://agent:8088
 
@@ -36,10 +45,12 @@ func FromEnv() Config {
 		MySQLUser:     getenv("PROXY_MYSQL_USER", "demo"),
 		MySQLPassword: mustEnv("PROXY_MYSQL_PASSWORD"),
 		MySQLDBName:   getenv("PROXY_MYSQL_DB", "dw"),
-		RedshiftDSN:   mustEnv("REDSHIFT_DSN"),
-		AgentURL:      getenv("AGENT_URL", "http://localhost:8088"),
-		CacheSize:     mustAtoi(getenv("CACHE_SIZE", "1024")),
-		MaxAttempts:   mustAtoi(getenv("MAX_ATTEMPTS", "3")),
+		RedshiftDSN:    mustEnv("REDSHIFT_DSN"),
+		MySQLDSN:       getenv("MYSQL_DSN", ""),
+		TableWhitelist: getenv("TABLE_WHITELIST", ""),
+		AgentURL:       getenv("AGENT_URL", "http://localhost:8088"),
+		CacheSize:      mustAtoi(getenv("CACHE_SIZE", "1024")),
+		MaxAttempts:    mustAtoi(getenv("MAX_ATTEMPTS", "3")),
 	}
 }
 

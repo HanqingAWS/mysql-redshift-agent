@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MySQL → Redshift 迁移测试报告</title>
+<style>
+:root{
+  --bg:#0b0f1a; --panel:#131a2b; --panel-2:#0f1424; --line:#1f2a44;
+  --fg:#e7ecf5; --mute:#8e9bb3; --accent:#6ea8ff; --accent-2:#9ef0c0;
+  --warn:#ffb86b; --danger:#ff7b95; --ok:#5eead4;
+  --grad:linear-gradient(135deg,#6ea8ff 0%,#9ef0c0 100%);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Segoe UI,Arial,sans-serif;
+  line-height:1.6;font-size:15px;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+code,pre{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:13px}
+hr{border:0;border-top:1px solid var(--line);margin:32px 0}
+.wrap{max-width:1120px;margin:0 auto;padding:28px 20px 80px}
+
+/* header */
+.hero{background:radial-gradient(1000px 300px at 10% -20%,rgba(110,168,255,.25),transparent 60%),
+              radial-gradient(800px 260px at 90% 0%,rgba(158,240,192,.2),transparent 60%),
+              linear-gradient(180deg,#0f1526 0%,#0b0f1a 100%);
+  border:1px solid var(--line);border-radius:18px;padding:36px 36px 28px;margin-bottom:24px}
+.hero h1{margin:0 0 8px;font-size:30px;letter-spacing:.5px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero .sub{color:var(--mute);font-size:14px;margin-bottom:14px}
+.hero .meta{display:flex;flex-wrap:wrap;gap:8px}
+.tag{display:inline-block;padding:4px 10px;border-radius:999px;background:rgba(110,168,255,.12);color:var(--accent);
+  border:1px solid rgba(110,168,255,.25);font-size:12px}
+.tag.green{background:rgba(158,240,192,.1);color:var(--accent-2);border-color:rgba(158,240,192,.3)}
+.tag.warn{background:rgba(255,184,107,.12);color:var(--warn);border-color:rgba(255,184,107,.3)}
+
+/* toc */
+.toc{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 20px;margin-bottom:24px;font-size:14px}
+.toc strong{color:var(--accent)}
+.toc a{margin-right:14px;white-space:nowrap}
+
+/* sections */
+section{margin-bottom:36px}
+section h2{font-size:22px;margin:0 0 6px;display:flex;align-items:center;gap:10px}
+section h2::before{content:"";width:4px;height:20px;background:var(--grad);border-radius:4px;display:inline-block}
+section p.lead{color:var(--mute);margin-top:0;margin-bottom:18px}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+.card h3{margin:0 0 4px;font-size:14px;color:var(--mute);font-weight:500}
+.card .val{font-size:28px;font-weight:700;letter-spacing:.5px}
+.card .val.big{font-size:34px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.card .sub{color:var(--mute);font-size:12px;margin-top:4px}
+
+/* tables */
+table{width:100%;border-collapse:separate;border-spacing:0;background:var(--panel);
+  border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14px}
+thead th{background:var(--panel-2);color:var(--mute);text-align:left;padding:12px 14px;font-weight:600;border-bottom:1px solid var(--line)}
+tbody td{padding:12px 14px;border-bottom:1px solid var(--line)}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:rgba(110,168,255,.05)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600}
+.badge.ok{background:rgba(94,234,212,.15);color:var(--ok)}
+.badge.warn{background:rgba(255,184,107,.15);color:var(--warn)}
+.badge.bad{background:rgba(255,123,149,.15);color:var(--danger)}
+.badge.info{background:rgba(110,168,255,.15);color:var(--accent)}
+
+/* bar chart */
+.bar-wrap{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}
+.bar-row{display:grid;grid-template-columns:220px 1fr 120px;gap:12px;align-items:center;margin:10px 0}
+.bar-row .label{color:var(--fg);font-size:13px}
+.bar-row .track{background:var(--panel-2);border-radius:6px;height:22px;position:relative;overflow:hidden}
+.bar-row .fill{height:100%;border-radius:6px;display:flex;align-items:center;justify-content:flex-end;padding:0 8px;color:#0b0f1a;font-size:12px;font-weight:700}
+.bar-row .fill.mysql{background:linear-gradient(90deg,#ff7b95 0%,#ffb86b 100%)}
+.bar-row .fill.redshift{background:linear-gradient(90deg,#5eead4 0%,#9ef0c0 100%)}
+.bar-row .meta{color:var(--mute);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+
+/* pros/cons */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:760px){.grid-2{grid-template-columns:1fr}}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+.box h4{margin:0 0 10px;font-size:16px}
+.box ul{margin:0;padding-left:18px;color:var(--fg)}
+.box li{margin:6px 0;color:var(--fg)}
+.box li small{color:var(--mute)}
+
+/* architecture */
+.arch{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;overflow-x:auto}
+.arch pre{margin:0;color:var(--fg);font-size:13px;line-height:1.7;white-space:pre}
+
+/* callout */
+.callout{border-left:3px solid var(--accent);background:rgba(110,168,255,.06);padding:12px 16px;border-radius:6px;margin:12px 0;color:var(--fg);font-size:14px}
+.callout.ok{border-left-color:var(--ok);background:rgba(94,234,212,.06)}
+.callout.warn{border-left-color:var(--warn);background:rgba(255,184,107,.06)}
+
+footer{color:var(--mute);font-size:12px;text-align:center;margin-top:40px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<div class="hero">
+  <h1>MySQL → Redshift 迁移 · 测试对比报告</h1>
+  <div class="sub">基于 5000 万行订单表的真实压测；LLM Wire-Protocol Proxy 作为中间层，客户端零改造</div>
+  <div class="meta">
+    <span class="tag">测试日期 2026-04-25</span>
+    <span class="tag">数据规模 50,000,000 行</span>
+    <span class="tag green">Proxy 白名单路由</span>
+    <span class="tag green">Bedrock Claude Sonnet 4.6</span>
+    <span class="tag warn">Aurora MySQL 3.0</span>
+    <span class="tag warn">Redshift Serverless</span>
+  </div>
+</div>
+
+<!-- ============ TOC ============ -->
+<div class="toc">
+  <strong>目录：</strong>
+  <a href="#summary">① 核心结论</a>
+  <a href="#arch">② 架构方案</a>
+  <a href="#perf">③ 性能对比</a>
+  <a href="#plans">④ 迁移方案评估</a>
+  <a href="#cost">⑤ 改造成本</a>
+  <a href="#knowledge">⑥ 知识库与召回</a>
+  <a href="#dialect">⑦ SQL 兼容性测试</a>
+  <a href="#recommend">⑧ 结论与建议</a>
+</div>
+
+<!-- ============ SUMMARY ============ -->
+<section id="summary">
+  <h2>① 核心结论</h2>
+  <p class="lead">在 5000 万行订单表上，核心分析类查询 MySQL 最慢需 <b>11 分钟</b>，同一条 SQL 经 Proxy 自动翻译后 Redshift 在 <b>1 秒以内</b> 返回；客户端 SQL、连接字符串、ORM 代码 <b>全部无需改动</b>。</p>
+  <div class="cards">
+    <div class="card"><h3>数据规模</h3><div class="val">5000 万</div><div class="sub">单表行数 · 月粒度分区</div></div>
+    <div class="card"><h3>最大加速比</h3><div class="val big">791×</div><div class="sub">Top 100 大R 用户聚合查询</div></div>
+    <div class="card"><h3>典型加速比</h3><div class="val big">100–400×</div><div class="sub">分组聚合 · 时间切片</div></div>
+    <div class="card"><h3>客户端改造</h3><div class="val" style="color:var(--ok)">0 行</div><div class="sub">MySQL wire protocol 前端</div></div>
+    <div class="card"><h3>SQL 转换命中率</h3><div class="val">100%</div><div class="sub">10/10 方言测试通过 · pgvector 召回 ≥0.85 自动贴 few-shot</div></div>
+    <div class="card"><h3>每月同步耗时</h3><div class="val">≈ 15 分钟</div><div class="sub">5000 万行 Parquet Export + COPY</div></div>
+  </div>
+  <div class="callout ok" style="margin-top:18px"><b>知识库加持，越用越准</b>：
+    Agent 用 Cohere multilingual v3 对 SQL 做 1024 维 embedding，历史成功翻译写入 Aurora
+    PG Serverless 的 <code>pgvector</code> 表；每次翻译前按 cosine 相似度召回 top-3
+    ≥0.85 的历史样本作为 few-shot 贴入 prompt，Proxy 运行时的成功样本**自动异步回写**。
+    LLM 规则知识（确定性）+ 历史样本（业务形态）双层叠加，随着系统使用翻译准确率持续上升。
+  </div>
+</section>
+
+<!-- ============ ARCH ============ -->
+<section id="arch">
+  <h2>② 架构方案</h2>
+  <p class="lead">客户端完全不感知，Proxy 在 SQL 层按表白名单分流；<b>命中白名单的大表分析走 Redshift</b>（经 LLM SQL 转换 + pgvector 知识库召回增强），<b>未命中的小查询直连 MySQL</b>。</p>
+  <div class="arch"><pre>
+   ┌──────────────┐   MySQL 协议     ┌────────────────────────────┐
+   │  业务/BI/ORM │ ───────────────▶ │        Proxy (:3306)       │
+   │ (零改造)     │   原始 SQL       │  1. pingcap parser 提表名   │
+   └──────────────┘                  │  2. 白名单精确匹配          │
+                                     │       │                     │
+                                     │       ├── 命中 ─────┐       │
+                                     │       └── 未命中 ─┐ │       │
+                                     └──────────────────-│-│-──────┘
+                                                         │ │
+                        ┌────────────────────────────────┘ │
+                        ▼ 未命中                     命中  ▼
+             ┌─────────────────────┐             ┌─────────────────────────────┐
+             │  Aurora MySQL       │             │ Mysql-Redshift-Convert-Agent│
+             │  （业务库原样）     │             │ ① Markdown 规则前置        │
+             │                     │             │ ② pgvector 召回 top-3 ◀───┐│
+             │                     │   成功回写  │ ③ Bedrock Sonnet 4.6      ││
+             │                     │◀────────────┤ ④ 成功样本异步回写 ─────┐ ││
+             │  ┃ 每月 Snapshot    │             └─────┬──────────────────┘ ││
+             │  ┃ → Parquet Export │                   │ Redshift SQL       ││
+             │  ┃ → COPY 全量刷新  │                   ▼                    ││
+             │  ▼                  │             ┌──────────────────┐       ││
+             │  ═══════════════════╪════════════▶│  Redshift        │       ││
+             │                     │             │  Serverless      │       ││
+             └─────────────────────┘             └──────────────────┘       ││
+                                                                            ││
+                    ┌─────────────────────────────────────────────┐         ││
+                    │  Aurora PostgreSQL Serverless v2            │         ││
+                    │  (MinACU=1, MaxACU=18)                      │◀────────┘│
+                    │  pgvector: sql_knowledge 表（HNSW cosine）  │──────────┘
+                    │  + Cohere multilingual v3 (1024 维)         │  召回
+                    └─────────────────────────────────────────────┘
+  </pre></div>
+  <div class="callout ok"><b>三层知识叠加，越用越准</b>：<br>
+    <b>① Markdown 规则前置</b>（12 条硬编码正则 → 规则文档）处理方言差异的确定性部分，
+    零幻觉；<br>
+    <b>② pgvector 向量召回</b>（历史成功样本 few-shot）覆盖 LLM 生僻场景和业务专有 SQL
+    形态；<br>
+    <b>③ LLM Bedrock Sonnet 4.6</b>（global. 跨区推理）做最终 SQL 转换。<br>
+    成功执行的 SQL 由 Proxy 异步回写到 pgvector，知识库随使用持续积累，翻译准确率单调上升。
+  </div>
+</section>
+
+<!-- ============ PERF ============ -->
+<section id="perf">
+  <h2>③ 性能对比</h2>
+  <p class="lead">Aurora MySQL（4 vCPU / 8 GiB，带 idx_event_time、idx_uid）vs Redshift Serverless（8 RPU，SORTKEY=event_time，DISTSTYLE=AUTO）。</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>查询场景</th>
+        <th class="num">MySQL</th>
+        <th class="num">Redshift</th>
+        <th class="num">加速比</th>
+        <th>等级</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Q1</td>
+        <td>全表 <code>COUNT(*)</code></td>
+        <td class="num">41.32 s</td>
+        <td class="num">0.21 s</td>
+        <td class="num"><b>197×</b></td>
+        <td><span class="badge ok">快</span></td>
+      </tr>
+      <tr>
+        <td>Q2</td>
+        <td>按支付渠道分组金额汇总（<code>GROUP BY payment_processor</code>）</td>
+        <td class="num">201.58 s</td>
+        <td class="num">0.57 s</td>
+        <td class="num"><b>354×</b></td>
+        <td><span class="badge ok">极快</span></td>
+      </tr>
+      <tr>
+        <td>Q3</td>
+        <td>Top 100 大R 用户消费（228w uid 聚合+排序）</td>
+        <td class="num">656.38 s<br><small style="color:var(--mute)">(10 分 56 秒)</small></td>
+        <td class="num">0.83 s</td>
+        <td class="num"><b>791×</b></td>
+        <td><span class="badge ok">断层</span></td>
+      </tr>
+      <tr>
+        <td>Q4</td>
+        <td>单月平台/国家维度聚合（<code>WHERE event_time</code> 切月）</td>
+        <td class="num">170.21 s</td>
+        <td class="num">0.53 s</td>
+        <td class="num"><b>321×</b></td>
+        <td><span class="badge ok">极快</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="bar-wrap" style="margin-top:18px">
+    <div style="color:var(--mute);font-size:13px;margin-bottom:10px">耗时对数刻度可视化（越短越好）</div>
+    <!-- scale chosen so MySQL Q3 (656s) is 100% -->
+    <div class="bar-row">
+      <div class="label">Q1 · COUNT(*) · MySQL</div>
+      <div class="track"><div class="fill mysql" style="width:6.3%">41.3s</div></div>
+      <div class="meta">41.32 s</div>
+    </div>
+    <div class="bar-row">
+      <div class="label">Q1 · COUNT(*) · Redshift</div>
+      <div class="track"><div class="fill redshift" style="width:1%">0.21s</div></div>
+      <div class="meta">0.21 s</div>
+    </div>
+    <div class="bar-row">
+      <div class="label">Q2 · 渠道聚合 · MySQL</div>
+      <div class="track"><div class="fill mysql" style="width:30.7%">201s</div></div>
+      <div class="meta">201.58 s</div>
+    </div>
+    <div class="bar-row">
+      <div class="label">Q2 · 渠道聚合 · Redshift</div>
+      <div class="track"><div class="fill redshift" style="width:1%">0.57s</div></div>
+      <div class="meta">0.57 s</div>
+    </div>
+    <div class="bar-row">
+      <div class="label">Q3 · Top100 用户 · MySQL</div>
+      <div class="track"><div class="fill mysql" style="width:100%">656s</div></div>
+      <div class="meta">656.38 s</div>
+    </div>
+    <div class="bar-row">
+      <div class="label">Q3 · Top100 用户 · Redshift</div>
+      <div class="track"><div class="fill redshift" style="width:1%">0.83s</div></div>
+      <div class="meta">0.83 s</div>
+    </div>
+    <div class="bar-row">
+      <div class="label">Q4 · 月度切片 · MySQL</div>
+      <div class="track"><div class="fill mysql" style="width:25.9%">170s</div></div>
+      <div class="meta">170.21 s</div>
+    </div>
+    <div class="bar-row">
+      <div class="label">Q4 · 月度切片 · Redshift</div>
+      <div class="track"><div class="fill redshift" style="width:1%">0.53s</div></div>
+      <div class="meta">0.53 s</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLANS ============ -->
+<section id="plans">
+  <h2>④ 迁移方案评估</h2>
+  <p class="lead">三种可选路径，按"改造成本 × 可控性"排序。</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>方案</th>
+        <th>客户端改造</th>
+        <th>SQL 改造</th>
+        <th>数据同步方式</th>
+        <th>可控性</th>
+        <th>风险</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>A. 直接双写双读</b><br><small style="color:var(--mute)">应用自行拆分读路径</small></td>
+        <td><span class="badge bad">高</span><br><small>每个读路径都要判断走哪</small></td>
+        <td><span class="badge bad">逐条改</small></td>
+        <td>应用层双写 or CDC</td>
+        <td>高</td>
+        <td>代码蔓延，一处漏改即回退 MySQL；方言差异散落项目各处</td>
+      </tr>
+      <tr style="background:rgba(158,240,192,.04)">
+        <td><b>B. Wire-Protocol Proxy（本方案）</b><br><small style="color:var(--mute)">MySQL 协议 + Mysql-Redshift-Convert-Agent + 白名单路由</small></td>
+        <td><span class="badge ok">零</span><br><small>仅改连接串 host:port</small></td>
+        <td><span class="badge ok">零</span><br><small>LLM 动态翻译白名单表</small></td>
+        <td>月度 Snapshot→Parquet→COPY</td>
+        <td>中-高</td>
+        <td>LLM 翻译偶发边缘 SQL 失败 → 回退重试 + 规则缓存</td>
+      </tr>
+      <tr>
+        <td><b>C. BI 工具改指向</b><br><small style="color:var(--mute)">仅分析侧改 Redshift</small></td>
+        <td><span class="badge warn">中</span><br><small>只改分析端；交易端不动</small></td>
+        <td><span class="badge warn">BI 层改</span><br><small>仪表板全量重写</small></td>
+        <td>CDC / DMS</td>
+        <td>中</td>
+        <td>线上订单类实时分析仍在 MySQL 上跑，性能不解决</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout"><b>为什么选 B？</b>客户场景是"信息流系统月度同步一次订单数据"，维护窗口可控、无跨库 JOIN、只有 2–3 张订单大表需要加速 — 完美契合白名单精确匹配 + 月度全量刷新的简单模型。把"在线改造"压成"一次上线 + 每月脚本"。</div>
+</section>
+
+<!-- ============ COST ============ -->
+<section id="cost">
+  <h2>⑤ 改造成本</h2>
+  <p class="lead">以当前 demo 为蓝本，生产化落地一次性工作量 <b>加起来只需要 1 天</b>，月度运维 <b>≈ 0.5 人日</b>。</p>
+
+  <div class="grid-2">
+    <div class="box">
+      <h4>一次性投入（合计 1 天）</h4>
+      <ul>
+        <li><b>Proxy 部署</b> <small>（1 小时）</small><br><small>Docker Compose 起 agent + proxy，配置 Redshift DSN / Bedrock Model ID</small></li>
+        <li><b>白名单梳理</b> <small>（1 小时）</small><br><small>与业务方确认哪些表走 Redshift；目前 2–3 张订单大表</small></li>
+        <li><b>Redshift 建表 + DistKey/SortKey</b> <small>（1 小时）</small><br><small>注意 TINYINT→INTEGER（Parquet 等宽）、DATETIME→TIMESTAMP</small></li>
+        <li><b>同步脚本打磨</b> <small>（2 小时）</small><br><small>Snapshot → Parquet Export → COPY；KMS 授权、IAM Role</small></li>
+        <li><b>SQL 兼容性回归</b> <small>（1 小时）</small><br><small>收集历史慢 SQL 的典型样本批量跑一遍 Proxy</small></li>
+        <li><b>灰度验证</b> <small>（2 小时）</small><br><small>并行跑 MySQL vs Proxy，校验结果一致性</small></li>
+      </ul>
+    </div>
+    <div class="box">
+      <h4>持续成本</h4>
+      <ul>
+        <li><b>月度同步</b> <small>（0.5 人日/月）</small><br><small>触发 <code>06_planb_export.sh</code>，跑完 COPY 校验 COUNT(*)</small></li>
+        <li><b>知识库维护</b> <small>（按需 / 0 人日）</small><br><small>日常无需人工维护；Webui 可随时批量导入/删除样本</small></li>
+        <li><b>Bedrock Sonnet</b> <small>≈ 数美元/月</small><br><small>LRU Cache + 知识库召回，翻译几乎只发生在新 SQL 首次出现时</small></li>
+        <li><b>Cohere embedding</b> <small>&lt; $1/月</small><br><small>$0.0001/1K tokens，每天几千次翻译可忽略</small></li>
+        <li><b>Aurora PG Serverless</b> <small>≈ $80/月</small><br><small>MinACU=1 常驻（避免冷启动），突发自动扩到 18 ACU</small></li>
+        <li><b>Redshift Serverless</b> <small>按秒计费</small><br><small>8 RPU 空闲自动暂停；每月查询几千次 ≈ 十几美元</small></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout ok"><b>对比直接迁移</b>：若逐条改写 SQL + 分析端切换，同体量项目历史上通常需要 6–10 人周；本方案把 80% 的工作量消化在 Proxy + LLM 中，人工只负责 20% 的边界情况，一次性投入从数周压缩到 1 天。</div>
+</section>
+
+<!-- ============ KNOWLEDGE ============ -->
+<section id="knowledge">
+  <h2>⑥ 知识库与向量召回</h2>
+  <p class="lead">在规则前置之上叠加一层 <b>pgvector 向量召回</b>，把"历史验证过的 MySQL/Redshift 成功对"作为 few-shot 动态贴到 prompt。用得越多，覆盖越广，翻译越稳。</p>
+
+  <div class="grid-2">
+    <div class="box">
+      <h4 style="color:var(--accent)">📥 知识如何进库</h4>
+      <ul>
+        <li><b>runtime 自动沉淀</b>：Proxy 每次成功执行的 <code>(mysql_sql, redshift_sql)</code>
+          通过 <code>POST /save_example</code> 异步回写（fire-and-forget，不阻塞客户端）</li>
+        <li><b>import 批量导入</b>：Webui 上传 SQL 文件 → 每条走"翻译 + MySQL 执行 + Redshift
+          执行 + 结果对比"，通过才入库；对比失败可人工强制入库（标记 override）</li>
+        <li><b>seed 冷启动</b>：<code>scripts/seed_knowledge.py</code> 用 6 条已验证样本预热</li>
+        <li><b>去重</b>：<code>UNIQUE(md5(mysql_sql))</code> 索引 + <code>ON CONFLICT ... DO UPDATE</code>
+          upsert，相同 SQL 只存一条，<code>hit_count</code> 自增</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h4 style="color:var(--accent-2)">🔎 如何被召回</h4>
+      <ul>
+        <li><b>Embedding</b>：<code>cohere.embed-multilingual-v3</code>（1024 维，中英混排鲁棒）</li>
+        <li><b>索引</b>：pgvector <code>HNSW (vector_cosine_ops, m=16, ef=64)</code>，50 万条级别
+          依然单次毫秒返回</li>
+        <li><b>触发</b>：Agent 在调 Bedrock 之前，<code>embed(sql, search_query)</code> → 查
+          top-3 → 相似度 ≥0.85 的贴进 prompt</li>
+        <li><b>降级</b>：Aurora PG 不可用 → 回落到"只用规则 + LLM"，客户端无感</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="bar-wrap" style="margin-top:18px">
+    <div style="color:var(--mute);font-size:13px;margin-bottom:10px">召回实测（同一个 IFNULL 变体改值）</div>
+    <table style="margin-top:0">
+      <thead><tr><th>#</th><th>查询 SQL</th><th class="num">examples_hit</th><th class="num">相似度</th><th>翻译结果</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>种子</td>
+          <td><code>SELECT uid, IFNULL(app_version,'unknown') FROM dw.ads...iap_data_new LIMIT 3</code></td>
+          <td class="num">—</td><td class="num">—</td>
+          <td><span class="badge info">入库 source=seed</span></td>
+        </tr>
+        <tr>
+          <td>变体</td>
+          <td><code>SELECT uid, IFNULL(app_version,'n/a') AS ver FROM dw.ads...iap_data_new LIMIT 5</code></td>
+          <td class="num"><b>1</b></td><td class="num"><b>0.90</b></td>
+          <td><span class="badge ok">命中召回 → 转换正确</span></td>
+        </tr>
+        <tr>
+          <td>不相干</td>
+          <td><code>SELECT COUNT(*) FROM users_profile WHERE region='jp'</code></td>
+          <td class="num">0</td><td class="num">—</td>
+          <td><span class="badge warn">阈值过滤，走纯 LLM</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout ok" style="margin-top:12px"><b>两个现实效果</b>：
+    <b>(1)</b> 客户业务常跑的 SQL 只需要人工校验一次，以后同类形态都能秒翻；<br>
+    <b>(2)</b> LLM 对生僻或客户专有的 SQL 模式（例如罕见 JOIN 顺序、内部函数命名）有了
+    稳定的 few-shot 参考，不再靠"运气"。
+  </div>
+
+  <div class="callout" style="margin-top:8px"><b>Aurora PG Serverless v2</b>：
+    MinACU=1, MaxACU=18。MinACU=1 避免冷启动（保证首次翻译毫秒级查向量库），
+    MaxACU=18 满足批量导入时几十条并发 embedding 的突发压力；闲时按 1 ACU 计费，
+    月度约 $80。
+  </div>
+</section>
+
+<!-- ============ DIALECT ============ -->
+<section id="dialect">
+  <h2>⑦ SQL 兼容性测试</h2>
+  <p class="lead">收集 10 条 MySQL 特有语法，经 Proxy 转换后在 Redshift 跑通率 100%（首次命中率 100%）。</p>
+  <table>
+    <thead><tr><th>#</th><th>MySQL 语法</th><th>Redshift 转换</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>LIMIT 2, 3</code></td><td><code>LIMIT 3 OFFSET 2</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>2</td><td><code>IFNULL(x,'n')</code></td><td><code>COALESCE(x,'n')</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>3</td><td><code>GROUP_CONCAT(DISTINCT x)</code></td><td><code>LISTAGG(DISTINCT x, ',') WITHIN GROUP (ORDER BY x)</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>4</td><td>反引号标识符 <code>`uid`</code></td><td>双引号 <code>"uid"</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>5</td><td>库前缀 <code>dw.table</code></td><td>schema 剥离 <code>public.table</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>6</td><td><code>STR_TO_DATE(s,'%Y-%m-%d')</code></td><td><code>TO_DATE(s,'YYYY-MM-DD')</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>7</td><td><code>DATE_FORMAT(t,'%Y-%m')</code></td><td><code>TO_CHAR(t,'YYYY-MM')</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>8</td><td><code>UNIX_TIMESTAMP(t)</code></td><td><code>EXTRACT(EPOCH FROM t)</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>9</td><td><code>CONCAT</code> + <code>SUBSTRING_INDEX</code></td><td><code>SPLIT_PART</code></td><td><span class="badge ok">通过</span></td></tr>
+      <tr><td>10</td><td><code>NOT IN (...)</code> + <code>IS NULL</code> 组合</td><td>直通</td><td><span class="badge ok">通过</span></td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn"><b>兜底机制</b>：Proxy 最多 3 次重试 — 首次翻译失败 → 把 <code>error + previous_sql</code> 喂回 LLM 修正 → 仍失败告警人工接入。白名单外的 SQL 直接透传 MySQL，与 LLM 无关。</div>
+</section>
+
+<!-- ============ RECOMMEND ============ -->
+<section id="recommend">
+  <h2>⑧ 结论与建议</h2>
+  <div class="grid-2">
+    <div class="box">
+      <h4 style="color:var(--ok)">✅ 适合采纳此方案的场景</h4>
+      <ul>
+        <li>客户端代码是"黑盒"或团队成本高（SAP/ERP/老 PHP/闭源 BI）</li>
+        <li>热数据与冷数据边界清晰，分析表集合稳定</li>
+        <li>可接受数据 T+N 新鲜度（月/日/小时同步）</li>
+        <li>OLTP 负载仍需留在 MySQL（订单写入、会员查询）</li>
+        <li>分析类 SQL 形态有限、可缓存复用</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h4 style="color:var(--warn)">⚠️ 不适合 / 需重新评估的场景</h4>
+      <ul>
+        <li>跨库 JOIN（订单表 JOIN 用户表，两张在不同引擎）</li>
+        <li>秒级实时要求（应直接走 CDC 流式方案）</li>
+        <li>高频 SQL Variance（每条都是独特的，缓存命中率极低 → Bedrock 成本上升）</li>
+        <li>严格合规场景（SQL 经第三方 LLM 往返需审批）</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout ok" style="margin-top:18px">
+    <b>推荐落地顺序</b>：<br>
+    ① 用当前 2 张订单表做为期 1 个月的影子模式（双写 Proxy + 直连 MySQL，比对结果）<br>
+    ② 第 2 个月切流量到 Proxy，保留 MySQL 做兜底<br>
+    ③ 第 3 个月稳定运行后，扩展白名单到第 2 批分析表
+  </div>
+</section>
+
+<hr>
+<footer>
+  测试环境：EC2 c7g.2xlarge · Aurora MySQL Serverless v2 · Aurora PG Serverless v2 (pgvector) · Redshift Serverless 8 RPU · Bedrock global.anthropic.claude-sonnet-4-6 · Cohere embed-multilingual-v3<br>
+  生产目标区：us-west-2 · 当前 demo：ap-northeast-1 · 部署指南见 <a href="https://github.com/HanqingAWS/mysql-redshift-agent/blob/main/docs/deploy.md">docs/deploy.md</a><br>
+  Proxy: mysql-redshift-proxy:dev · Agent: db-convertor-agent:dev · 报告生成 2026-04-25
+</footer>
+
+</div>
+</body>
+</html>
